@@ -1,0 +1,409 @@
+Analysis of Titanic Survival Data
+========================================================
+author: Andras Horvath
+date: april 25, 2018
+autosize: true
+
+<style>
+.small-code pre code {
+  font-size: 1em;
+}
+.small-list li {
+  font-size: 24px;
+}
+</style>
+
+
+
+Datasets
+==========
+
+1. Summarized Titanic dataset ([R dataset](https://github.com/vincentarelbundock/Rdatasets/blob/master/csv/datasets/Titanic.csv))
+  - Ticket classes available
+  - Summarized survival frequencies
+
+2. Kaggle Titanic dataset from: <https://www.kaggle.com/c/titanic/data>
+  - Ticket classes available
+  - Ticket fares available
+  - Records for each passenger
+  
+### Question:
+What ticket maximizes the chance of survival of the disaster?
+
+
+
+Titanic dataset
+==========
+```{r echo = F, eval = T}
+df = as.data.frame(Titanic)
+```
+
+### Features:
+  * Class:  
+      `r unique(df$Class)[1]` : `r sum(df[df$Class == unique(df$Class)[1], "Freq"])`  
+      `r unique(df$Class)[2]` : `r sum(df[df$Class == unique(df$Class)[2], "Freq"])`  
+      `r unique(df$Class)[3]` : `r sum(df[df$Class == unique(df$Class)[3], "Freq"])`
+
+  - Sex:  
+      `r unique(df$Sex)[1]` : `r sum(df[df$Sex == unique(df$Sex)[1], "Freq"])`  
+      `r unique(df$Sex)[2]` : `r sum(df[df$Sex == unique(df$Sex)[2], "Freq"])`
+
+  - Age:  
+      `r unique(df$Age)[1]` : `r sum(df[df$Age == unique(df$Age)[1], "Freq"])`  
+      `r unique(df$Age)[2]` : `r sum(df[df$Age == unique(df$Age)[2], "Freq"])`
+      
+***
+  - Survived:  
+      `r unique(df$Survived)[1]` : `r sum(df[df$Survived == unique(df$Survived)[1], "Freq"])`   
+      `r unique(df$Survived)[2]` : `r sum(df[df$Survived == unique(df$Survived)[2], "Freq"])`
+
+  - Freq:  
+      `r range(df$Freq)[1]` - `r range(df$Freq)[2]`
+
+
+
+Analytic approaches
+==========
+
+1. Inferential analysis
+  + Estimate probabilities from group frequencies
+  + Test if survival is dependent on ticket class (Chi-Squared test of independence)
+
+2. Fitting model to data and learn from coefficients
+  + Coefficients indicate that the effect is positive or negative
+  + Significance of the effects can be estimated
+  + The models should return probabilities  
+
+  2a. Binomial regression to survival outcome  
+  
+  2b. Linear regression to survival probabilities
+  
+
+
+1. Inferential analysis
+==========
+class: small-code
+```{r echo = F, eval = T}
+TestChiSq = function(M){
+  ExpFreq = t(t(rowSums(M))) %*% colSums(M) / sum(M)
+  if (min(ExpFreq) < 5){
+    # The test is not reliable if one of the expected frequencies is below 5
+    return(NaN)
+  } else {
+    return(chisq.test(M)$p.value)
+  }
+}
+
+GetBestClass = function(Sex, Age){
+  subset = df[df$Sex == Sex & df$Age == Age & df$Class != "Crew", ]
+  M = as.table(cbind(subset[subset$Survived == "No", "Freq"], subset[subset$Survived == "Yes", "Freq"]))
+  dimnames(M) = list(Class = 1:3, Survived = c(F, T))
+  
+  # Relative marginal frequencies by survival
+  MRelFreq = apply(M, 2, function(x){x / rowSums(M)})[, 2]
+  # P-values with Bonferroni adjustment
+  Pval_1vs2 = TestChiSq(M[c(1, 2), ]) * 3
+  Pval_1vs3 = TestChiSq(M[c(1, 3), ]) * 3
+  Pval_2vs3 = TestChiSq(M[c(2, 3), ]) * 3
+  
+  ResDf = as.data.frame(cbind(MRelFreq, c(1, Pval_1vs2, Pval_1vs3), c(Pval_1vs2, 1, Pval_2vs3), c(Pval_1vs3, Pval_2vs3, 1)))
+  rownames(ResDf) = c("1st", "2nd", "3rd")
+  colnames(ResDf) = c("Prob", "pV1", "pV2", "pV3")
+  
+  return(ResDf)
+}
+
+resMA = as.data.frame(GetBestClass("Male", "Adult"))
+colnames(resMA) = c("Probability", "Compare:1st", "Compare:2nd", "Compare:3rd")
+resFC = as.data.frame(GetBestClass("Female", "Child"))
+colnames(resFC) = c("Probability", "Compare:1st", "Compare:2nd", "Compare:3rd")
+```
+
+### Example: Male, Adult
+```{r echo = F, eval = T}
+resMA
+```
+
+### Example: Female, Child
+```{r echo = F, eval = T}
+resFC
+```
+- Returns actual probabilities
+- Indicates reliability (Chi-Squared test is unreliable at low frequencies)
+
+
+
+2a. Binary regression
+==========
+class: small-code
+```{r echo = F, eval = T}
+model_bin = glm(Survived ~ Sex + Age + Class, weights = df$Freq, data = df, family = "binomial")
+summary(model_bin)$coef
+```
+**Intercept**: Male and Child at 1st class  
+**Effect of Age**: Adults have lower chance of survival  
+**Effect of Class**: 2nd and 3rd Classes decrease the chance of survival
+
+
+
+2b. Linear regression
+==========
+class: small-code
+```{r echo = F, eval = T}
+# summarized data
+df_a = df[df$Survived == "Yes", c("Class", "Sex", "Age", "Freq")]
+names(df_a)[ncol(df_a)] = "YesFreq"
+df_b = df[df$Survived == "No", c("Class", "Sex", "Age", "Freq")]
+names(df_b)[ncol(df_b)] = "NoFreq"
+df_mod = merge(df_a, df_b, by = c("Class", "Sex", "Age"))
+df_mod$SProb = df_mod$YesFreq / (df_mod$YesFreq + df_mod$NoFreq)
+df_mod = df_mod[!is.na(df_mod$SProb), ]
+
+model_lin = lm(SProb ~ Sex + Age + Class, weights = df_mod$YesFreq + df_mod$NoFreq, data = df_mod)
+summary(model_lin)$coef
+```
+**Intercept**: Male and Child at 1st class  
+**Effect of Age**: Adults have lower chance of survival, but not significant according to the model  
+**Effect of Class**: 2nd and 3rd Classes decrease the chance of survival, but the effect is significant only in the case of 3rd Class 
+
+
+
+Compare approaches
+==========
+```{r, echo = F, eval = T}
+GetAcc = function(pred){
+  # compare relative frequencies to predicted probabilities
+  # summarize result as root mean squared deviation
+  RMSD = sqrt(sum((pred - df_mod$SProb)^2 * (df_mod$YesFreq + df_mod$NoFreq)) / sum(df_mod$YesFreq + df_mod$NoFreq))
+  return(RMSD)
+}
+```
+We use these models for probability estimation which is continous.  
+Accuracy measure: Root mean squared deviance (RMSD) of predicted probabilities relative to actual probabilities
+
+- Inferential analysis:  
+  returns actual probabilities (RMSD = 0)
+
+- Binary regression model:  
+  RMSD = `r GetAcc(predict(model_bin, df_mod, type = "response"))`
+
+- Linear regression model:  
+  RMSD = `r GetAcc(predict(model_lin, df_mod, type = "response"))`
+
+
+
+Conclusion
+==========
+
+- All the three approaches indicate that buying a First class ticket garantees the highest chance of survival.
+
+- All the three approaches return probabilities for a given condition (Sex, Age)
+
+- The Inferential analysis provides the most accurate probability
+
+
+
+Titanic Kaggle dataset
+==========
+```{r echo = F, eval = T}
+tdf = read.csv("train.csv")
+```
+The dataset conists of `r nrow(tdf)` records.  
+Variables:
+- Passenger ID
+- Name
+- Sex: `r round(sum(tdf$Sex == "male")/nrow(tdf)*100, digits = 2)`% males
+- Age: `r range(tdf$Age, na.rm = T)[1]` - `r range(tdf$Age, na.rm = T)[2]`; `r sum(is.na(tdf$Age))` NAs
+- No of siblings / spouses on board
+- No of parents / children on board
+
+***
+- Class
+- Fare: `r range(tdf$Fare)[1]` - `r range(tdf$Fare)[2]`
+- Cabin: `r sum(tdf$Cabin == "")` NAs
+- City embarked: `r sum(tdf$Embarked == "")` NAs
+- Ticket ID
+- Survived: `r round(sum(tdf$Survived)/nrow(tdf)*100, digits = 2)`%
+
+
+
+Cleaning dataset
+==========
+class: small-list
+```{r echo = F, eval = T}
+library(caret)
+selected = tdf[, c(
+              "Survived",
+              "Pclass",
+              "Sex",
+              "Age",
+              "Fare",
+              "Embarked"
+          )]
+selected$Family = tdf$SibSp + tdf$Parch
+selected = selected[!is.na(selected$Age) & selected$Embarked != "", ]
+selected$Pclass = as.factor(selected$Pclass)
+# normalizing Fares did not make predictions better
+#taf$Fare = log(taf$Fare + 1)
+# scaling Ages did not make predictions better
+#taf$Age = scale(taf$Age)
+set.seed(341)
+train_ndx = createDataPartition(selected$Survived, p = 0.7, list = F)
+selected$FareHigh = selected$Fare > median(selected[train_ndx, "Fare"])
+```
+
+Included variables:|
+-------
+Sex|
+Age|
+Family: no of family members on board (siblings, spouses, parents, children)|
+Class|
+Fare|
+High fare: Is the fare higher than the median of prices|
+City embarked|
+Survived|
+
+***
+Handling missing values:
+- Age: filtering NAs  
+(other option: replace by median)
+- City embarked: filtering NAs
+
+Continous variable scaling/normalizing:
+- Age, Fare: perfomed but did not make predictions better
+
+Subsetting:
+- Randomized subsetting to 70% training and 30% test set
+
+
+
+Exploratory data analysis
+==========
+class: small-list
+Fare and Class:  
+```{r echo = F, eval = T}  
+ggplot(selected[train_ndx, ], aes(x = Pclass, y = Fare, color = Survived == 1)) +
+  geom_jitter(position = position_jitter(0.4), size = 3, alpha = 0.3) +
+  labs(x = "Class", color = "Survived") +
+  theme(axis.text = element_text(size = 20),
+        axis.title = element_text(size = 24),
+        legend.text = element_text(size = 16),
+        legend.title = element_text(size = 24))
+```
+***
+Embarked City and Class:  
+```{r echo = F, eval = T}
+ggplot(selected[train_ndx, ], aes(x = Embarked, fill = Pclass)) + 
+  geom_bar() +
+  labs(fill = "Class") +
+  theme(axis.text = element_text(size = 20),
+      axis.title = element_text(size = 24),
+      legend.text = element_text(size = 16),
+      legend.title = element_text(size = 24))
+```
+  
+- Embarked Cities: Cherbourg, Queenstown, Southampton
+
+
+Exploratory data analysis
+==========
+
+Demography:  
+```{r echo = F, eval = T}
+ggplot(selected[train_ndx, ], aes(x = Family, y = Age, color = Sex)) + 
+  geom_jitter(position = position_jitter(0.2), size = 3, alpha = 0.3) +
+  xlab("Family Size") +
+  theme(axis.text = element_text(size = 20),
+    axis.title = element_text(size = 24),
+    legend.text = element_text(size = 16),
+    legend.title = element_text(size = 24))
+```
+***
+Sex, age and survival:  
+```{r echo = F, eval = T}
+ggplot(selected[train_ndx, ], aes(x = Sex, y = Age, color = Survived == 1)) +
+  geom_jitter(position = position_jitter(0.2), size = 3, alpha = 0.3) +
+  labs(color = "Survived") +
+  theme(axis.text = element_text(size = 20),
+    axis.title = element_text(size = 24),
+    legend.text = element_text(size = 16),
+    legend.title = element_text(size = 24))
+```
+
+
+
+Machine learning
+==========
+class: small-list
+```{r echo = F, eval = T}
+GetAcc = function(pred, data){
+  # accuracy evaluation
+  po = pred > 0.5
+  ao = data$Survived == 1
+  Acc = sum(po == ao)/nrow(data)
+  Prec = sum(po == 1 & ao == 1)/sum(po)
+  Rec = sum(po == 1 & ao == 1)/sum(ao)
+  return(c(Accuracy = Acc, Precision = Prec, Recall = Rec))
+}
+
+# binary regression
+model_bin = glm(Survived ~ ., data = selected[train_ndx, ], family = "binomial")
+acc_bin = GetAcc(predict(model_bin, selected[-train_ndx, ], type = "response"), selected[-train_ndx, ])
+
+# binary regression with lasso regularization
+library(glmnet)
+mtrain = model.matrix(~., selected[train_ndx, c("Pclass", "Sex", "Age", "Family", "Fare", "Embarked")])
+mtest = model.matrix(~., selected[-train_ndx, c("Pclass", "Sex", "Age", "Family", "Fare", "Embarked")])
+model_lassobin = cv.glmnet(mtrain, selected[train_ndx, 1], alpha = 1, family = "binomial")
+acc_lasso = GetAcc(predict(model_lassobin, mtest, type = "response"), selected[-train_ndx, ])
+
+# svm
+library(e1071)
+model_minlinsvm = svm(Survived ~ Pclass + Sex + Age + Family, data = selected[train_ndx, ], kernel = "linear")
+acc_svm = GetAcc(predict(model_minlinsvm, selected[-train_ndx, ]), selected[-train_ndx, ])
+
+#lda
+library(MASS)
+model_lda = lda(Survived ~ Pclass + Sex + Age + Family + FareHigh, data = selected[train_ndx, ])
+acc_lda = GetAcc(predict(model_lda, selected[-train_ndx, ])$posterior[, 2], selected[-train_ndx, ])
+
+#gam
+library(gam)
+model_gam = gam(Survived ~ Pclass + Sex + s(Age, 6) + s(Family, 6) + s(Fare, 6) + FareHigh, data = selected[train_ndx, ])
+acc_gam = GetAcc(predict(model_gam, selected[-train_ndx, ]), selected[-train_ndx, ])
+```
+Performed for each model:  
+- Selecting parsimonious model (fewest features)
+- Parameter/kernel optimization  
+
+Model                | Accuracy (%)                     | Precision (%)                    | Recall (%)
+---------------------|----------------------------------|----------------------------------|--------------------------------
+Binary (all features)| `r round(acc_bin[1] * 100, 2)`   | `r round(acc_bin[2] * 100, 2)`   | `r round(acc_bin[3] * 100, 2)`
+Binary, Lasso (Sex, Age, Family, Class, Fare, Embarked City)  | `r round(acc_lasso[1] * 100, 2)` | `r round(acc_lasso[2] * 100, 2)` | `r round(acc_lasso[3] * 100, 2)`
+SVM, linear (Sex, Age, Family, Class)   | `r round(acc_svm[1] * 100, 2)`   | `r round(acc_svm[2] * 100, 2)`   | `r round(acc_svm[3] * 100, 2)`
+LDA (Sex, Age, Family, Class, High Fare)   | `r round(acc_lda[1] * 100, 2)`   | `r round(acc_lda[2] * 100, 2)`   | `r round(acc_lda[3] * 100, 2)`
+GAM (Sex, Age, Family, Fare, High Fare)   | `r round(acc_gam[1] * 100, 2)`   | `r round(acc_gam[2] * 100, 2)`   | `r round(acc_gam[3] * 100, 2)`
+  
+  
+
+Effect of Class and Fare
+==========
+class: small-code
+Coefficients of binary regression:
+```{r echo = F, eval = T}
+summary(model_bin)$coef
+```
+- Class 2nd and 3rd significantly decreases the chance of survival
+- Increase of Fare and Fare above the median may increase the rate of survival but the effect is not significant
+
+
+Summary
+==========
+- All machine learning approaches performed about the same accuracy around 80%
+- The most accurate models were: binary regression with regularization and generalized additive model
+- The most parsimonious models the support vector machine
+
+Reasons for preference for SVM:
+- Parsimonious thanks to dimension reduction
+- Slight, less than 1% accuracy decrease compared to the most accurate models
+- Based on this model, we can exclude the bare effect of Fare emphasizing rather the significant impact of Class on survival
